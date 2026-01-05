@@ -124,7 +124,6 @@ def pack_rip_first(panel: PanelSpec, pieces: List[PieceInstance]) -> PanelLayout
         best_choice = None
         # score: (creates_new_strip, strip_height, wasted_x_after, y_pos)  lower is better
         for L, W, rot in cands:
-            # try existing strip first
             for s in strips:
                 if s["h"] != W:
                     continue
@@ -135,7 +134,6 @@ def pack_rip_first(panel: PanelSpec, pieces: List[PieceInstance]) -> PanelLayout
                     if best_choice is None or score < best_choice[0]:
                         best_choice = (score, ("existing", s, L, W, rot))
 
-            # otherwise consider creating a new strip
             new_y = 0 if not strips else strips[-1]["y"] + strips[-1]["h"] + k
             if new_y + W <= UW:
                 wasted_x = UL - L
@@ -177,7 +175,6 @@ def pack_crosscut_first(panel: PanelSpec, pieces: List[PieceInstance]) -> PanelL
         best_choice = None
         # score: (creates_new_band, band_length, wasted_y_after, x_pos) lower is better
         for L, W, rot in cands:
-            # try existing band first
             for b in bands:
                 if b["w"] != L:
                     continue
@@ -188,7 +185,6 @@ def pack_crosscut_first(panel: PanelSpec, pieces: List[PieceInstance]) -> PanelL
                     if best_choice is None or score < best_choice[0]:
                         best_choice = (score, ("existing", b, L, W, rot))
 
-            # otherwise consider creating a new band
             new_x = 0 if not bands else bands[-1]["x"] + bands[-1]["w"] + k
             if new_x + L <= UL:
                 wasted_y = UW - W
@@ -207,5 +203,64 @@ def pack_crosscut_first(panel: PanelSpec, pieces: List[PieceInstance]) -> PanelL
             placements.append(Placement(p.name, b["x"], y, L, W, rot))
             b["y"] = y + W + k
         else:
-            new
+            new_x, L, W, rot = choice[1], choice[2], choice[3], choice[4]
+            bands.append({"x": new_x, "w": L, "y": W + k})
+            placements.append(Placement(p.name, new_x, 0, L, W, rot))
 
+    groups = [(b["x"], b["w"]) for b in bands]
+    return PanelLayout(strategy="CROSSCUT_FIRST", placements=placements, groups=groups)
+
+
+def estimate_cuts(layouts: List[PanelLayout]) -> int:
+    total = 0
+    for lay in layouts:
+        total += max(0, len(lay.groups) - 1) + len(lay.placements)
+    return total
+
+
+def compute_solution_metrics(panel: PanelSpec, layouts: List[PanelLayout], strategy: str) -> Solution:
+    panels_used = len(layouts)
+    used_area_mm2 = sum(l.used_area_mm2 for l in layouts)
+    total_usable_mm2 = panels_used * panel.usable_area_mm2 if panels_used > 0 else 0
+    utilization_pct = (used_area_mm2 / total_usable_mm2 * 100.0) if total_usable_mm2 else 0.0
+    return Solution(
+        strategy=strategy,
+        panel_layouts=layouts,
+        panels_used=panels_used,
+        est_cuts=estimate_cuts(layouts),
+        used_area_mm2=used_area_mm2,
+        utilization_pct=utilization_pct
+    )
+
+
+def solve(panel: PanelSpec, piece_specs: List[PieceType]) -> List[Solution]:
+    pieces = expand_pieces(piece_specs)
+
+    bad = [p.name for p in pieces if not can_fit(panel, p)]
+    if bad:
+        raise ValueError("Pieces do not fit in usable panel area: " + ", ".join(bad))
+
+    solutions: List[Solution] = []
+    for strategy in ("RIP_FIRST", "CROSSCUT_FIRST"):
+        remaining = pieces[:]
+        layouts: List[PanelLayout] = []
+
+        while remaining:
+            lay = pack_rip_first(panel, remaining) if strategy == "RIP_FIRST" else pack_crosscut_first(panel, remaining)
+            placed = {pl.piece_name for pl in lay.placements}
+            if not placed:
+                break
+            layouts.append(lay)
+            remaining = [p for p in remaining if p.name not in placed]
+
+        solutions.append(compute_solution_metrics(panel, layouts, strategy))
+
+    solutions.sort(key=lambda s: (s.panels_used, s.est_cuts))
+    best = [solutions[0]]
+    if len(solutions) > 1:
+        s0, s1 = solutions[0], solutions[1]
+        if (s1.panels_used, s1.est_cuts) != (s0.panels_used, s0.est_cuts):
+            best.append(s1)
+        elif s1.strategy != s0.strategy:
+            best.append(s1)
+    return best
