@@ -1,3 +1,5 @@
+import streamlit as st
+st.set_option("client.showErrorDetails", True)
 import io
 import csv
 import streamlit as st
